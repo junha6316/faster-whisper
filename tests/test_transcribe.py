@@ -1,7 +1,11 @@
+import functools
 import inspect
 import os
 
+from types import SimpleNamespace
+
 import numpy as np
+import pytest
 
 from faster_whisper import BatchedInferencePipeline, WhisperModel, decode_audio
 
@@ -313,3 +317,97 @@ def test_cliptimestamps_timings(physcisworks_path):
         assert clip["start"] == segment.start
         assert clip["end"] == segment.end
         assert segment.text == transcript
+
+
+class _FakeTimestampTokenizer:
+    timestamp_begin = 50364
+
+    def decode(self, tokens):
+        return " ".join(str(t) for t in tokens if t < self.timestamp_begin)
+
+
+def _make_fake_split_model():
+    model = SimpleNamespace(time_precision=0.02, input_stride=2, frames_per_second=50)
+    model._split_segments_by_timestamps = functools.partial(
+        WhisperModel._split_segments_by_timestamps, model
+    )
+    return model
+
+
+def _ts(seconds):
+    return _FakeTimestampTokenizer.timestamp_begin + round(seconds / 0.02)
+
+
+def test_split_segments_by_timestamps_unfinished_tail():
+    tokenizer = _FakeTimestampTokenizer()
+    model = _make_fake_split_model()
+    # <|0.00|> 1 2 <|2.00|><|2.40|> 3 4  (no closing timestamp for "3 4")
+    tokens = [_ts(0.0), 1, 2, _ts(2.0), _ts(2.4), 3, 4]
+    kwargs = dict(
+        tokenizer=tokenizer,
+        tokens=tokens,
+        time_offset=10.0,
+        segment_size=250,
+        segment_duration=5.0,
+        seek=0,
+    )
+
+    # Sequential path: the unfinished tail is dropped and re-decoded from seek.
+    segments, seek, single_timestamp_ending = model._split_segments_by_timestamps(
+        **kwargs
+    )
+    assert not single_timestamp_ending
+    assert len(segments) == 1
+    assert segments[0]["tokens"] == tokens[:4]
+    assert seek == 200
+
+    # Batched path: the unfinished tail is kept as the last segment.
+    segments, seek, single_timestamp_ending = model._split_segments_by_timestamps(
+        **kwargs, keep_unfinished_segment=True
+    )
+    assert not single_timestamp_ending
+    assert seek == 200
+    assert len(segments) == 2
+    assert segments[0]["tokens"] == tokens[:4]
+    assert segments[1]["tokens"] == tokens[4:]
+    assert segments[1]["start"] == pytest.approx(12.4)
+    assert segments[1]["end"] == pytest.approx(15.0)
+
+
+def test_split_segments_by_timestamps_tail_without_text():
+    tokenizer = _FakeTimestampTokenizer()
+    model = _make_fake_split_model()
+    # <|0.00|> 1 2 <|2.00|><|2.40|>  (tail contains only a timestamp)
+    tokens = [_ts(0.0), 1, 2, _ts(2.0), _ts(2.4)]
+    segments, _, _ = model._split_segments_by_timestamps(
+        tokenizer=tokenizer,
+        tokens=tokens,
+        time_offset=0.0,
+        segment_size=250,
+        segment_duration=5.0,
+        seek=0,
+        keep_unfinished_segment=True,
+    )
+    assert [s["tokens"] for s in segments] == [tokens[:4]]
+
+
+def test_batched_forward_keeps_unfinished_tail(monkeypatch):
+    tokenizer = _FakeTimestampTokenizer()
+    pipeline = BatchedInferencePipeline(_make_fake_split_model())
+    tokens = [_ts(0.0), 1, 2, _ts(2.0), _ts(2.4), 3, 4]
+    monkeypatch.setattr(
+        pipeline,
+        "generate_segment_batched",
+        lambda *args: (
+            None,
+            [dict(tokens=tokens, avg_logprob=-0.1, no_speech_prob=0.0)],
+        ),
+    )
+    options = SimpleNamespace(word_timestamps=False)
+    chunks_metadata = [dict(offset=10.0, duration=5.0)]
+
+    (segments,) = pipeline.forward(None, tokenizer, chunks_metadata, options)
+
+    assert [s["text"] for s in segments] == ["1 2", "3 4"]
+    assert segments[1]["start"] == pytest.approx(12.4)
+    assert segments[1]["end"] == pytest.approx(15.0)
