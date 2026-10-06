@@ -313,3 +313,81 @@ def test_cliptimestamps_timings(physcisworks_path):
         assert clip["start"] == segment.start
         assert clip["end"] == segment.end
         assert segment.text == transcript
+
+
+class _StopAfterVad(Exception):
+    pass
+
+
+def _run_batched_vad(monkeypatch, audio, vad_parameters):
+    import faster_whisper.transcribe as transcribe_module
+
+    captured = {}
+    real_get_speech_timestamps = transcribe_module.get_speech_timestamps
+    real_collect_chunks = transcribe_module.collect_chunks
+
+    def spy_get_speech_timestamps(audio, vad_options=None, **kwargs):
+        captured["vad_options"] = vad_options
+        return real_get_speech_timestamps(audio, vad_options, **kwargs)
+
+    def spy_collect_chunks(*args, **kwargs):
+        captured["chunks"] = real_collect_chunks(*args, **kwargs)
+        raise _StopAfterVad
+
+    monkeypatch.setattr(
+        transcribe_module, "get_speech_timestamps", spy_get_speech_timestamps
+    )
+    monkeypatch.setattr(transcribe_module, "collect_chunks", spy_collect_chunks)
+
+    model = WhisperModel("tiny")
+    pipeline = BatchedInferencePipeline(model=model)
+    try:
+        pipeline.transcribe(audio, vad_parameters=vad_parameters)
+    except _StopAfterVad:
+        pass
+    return captured
+
+
+def test_batched_vad_options_instance_max_speech(
+    physcisworks_path, monkeypatch, caplog
+):
+    from faster_whisper.vad import VadOptions
+
+    audio = decode_audio(physcisworks_path)
+    vad_options = VadOptions()
+    with caplog.at_level("WARNING", logger="faster_whisper"):
+        captured = _run_batched_vad(monkeypatch, audio, vad_options)
+
+    assert "max_speech_duration_s is larger than chunk_length" in caplog.text
+    assert captured["vad_options"].max_speech_duration_s == 30
+    _, chunks_metadata = captured["chunks"]
+    assert all(chunk["duration"] <= 30 for chunk in chunks_metadata)
+    assert all(chunk["duration"] > 0 for chunk in chunks_metadata)
+
+    # The caller's object must not be modified.
+    assert vad_options == VadOptions()
+
+
+def test_batched_vad_options_instance_smaller_max_speech_kept(
+    jfk_path, monkeypatch, caplog
+):
+    from faster_whisper.vad import VadOptions
+
+    audio = decode_audio(jfk_path)
+    vad_options = VadOptions(max_speech_duration_s=5)
+    with caplog.at_level("WARNING", logger="faster_whisper"):
+        captured = _run_batched_vad(monkeypatch, audio, vad_options)
+
+    assert "max_speech_duration_s" not in caplog.text
+    assert captured["vad_options"] is vad_options
+    assert captured["vad_options"].max_speech_duration_s == 5
+
+
+def test_batched_vad_parameters_dict_not_mutated(jfk_path, monkeypatch):
+    audio = decode_audio(jfk_path)
+    vad_parameters = dict(max_speech_duration_s=10, min_silence_duration_ms=500)
+    captured = _run_batched_vad(monkeypatch, audio, vad_parameters)
+
+    assert captured["vad_options"].max_speech_duration_s == 30
+    assert captured["vad_options"].min_silence_duration_ms == 500
+    assert vad_parameters == dict(max_speech_duration_s=10, min_silence_duration_ms=500)
