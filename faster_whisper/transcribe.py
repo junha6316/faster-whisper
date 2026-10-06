@@ -117,6 +117,14 @@ class BatchedInferencePipeline:
         self.last_speech_timestamp = 0.0
 
     def forward(self, features, tokenizer, chunks_metadata, options):
+        segmented_outputs, self.last_speech_timestamp = self._forward(
+            features, tokenizer, chunks_metadata, options, self.last_speech_timestamp
+        )
+        return segmented_outputs
+
+    def _forward(
+        self, features, tokenizer, chunks_metadata, options, last_speech_timestamp
+    ):
         encoder_output, outputs = self.generate_segment_batched(
             features, tokenizer, options
         )
@@ -159,17 +167,17 @@ class BatchedInferencePipeline:
                 ]
             )
         if options.word_timestamps:
-            self.last_speech_timestamp = self.model.add_word_timestamps(
+            last_speech_timestamp = self.model.add_word_timestamps(
                 segmented_outputs,
                 tokenizer,
                 encoder_output,
                 segment_sizes,
                 options.prepend_punctuations,
                 options.append_punctuations,
-                self.last_speech_timestamp,
+                last_speech_timestamp,
             )
 
-        return segmented_outputs
+        return segmented_outputs, last_speech_timestamp
 
     def generate_segment_batched(
         self,
@@ -584,12 +592,14 @@ class BatchedInferencePipeline:
     ):
         pbar = tqdm(total=len(features), disable=not log_progress, position=0)
         seg_idx = 0
+        last_speech_timestamp = 0.0
         for i in range(0, len(features), batch_size):
-            results = self.forward(
+            results, last_speech_timestamp = self._forward(
                 features[i : i + batch_size],
                 tokenizer,
                 chunks_metadata[i : i + batch_size],
                 options,
+                last_speech_timestamp,
             )
 
             for result in results:
@@ -616,7 +626,6 @@ class BatchedInferencePipeline:
                 pbar.update(1)
 
         pbar.close()
-        self.last_speech_timestamp = 0.0
 
 
 class WhisperModel:

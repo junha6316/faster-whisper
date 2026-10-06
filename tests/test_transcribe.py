@@ -313,3 +313,42 @@ def test_cliptimestamps_timings(physcisworks_path):
         assert clip["start"] == segment.start
         assert clip["end"] == segment.end
         assert segment.text == transcript
+
+
+def test_batched_word_timestamps_interleaved_generators(jfk_path):
+    model = WhisperModel("tiny")
+    pipeline = BatchedInferencePipeline(model=model)
+
+    jfk = decode_audio(jfk_path)
+    silence = np.zeros(5 * 16000, dtype=jfk.dtype)
+    inputs = [
+        (np.concatenate([silence, jfk]), [{"start": 0.0, "end": 16.0}]),
+        (
+            np.concatenate([jfk, silence, jfk]),
+            [{"start": 0.0, "end": 11.0}, {"start": 11.0, "end": 27.0}],
+        ),
+    ]
+
+    def transcribe(audio, clip_timestamps):
+        segments, _ = pipeline.transcribe(
+            audio,
+            clip_timestamps=clip_timestamps,
+            batch_size=1,
+            word_timestamps=True,
+        )
+        return segments
+
+    def get_words(segments):
+        return [(w.word, w.start, w.end) for s in segments for w in s.words]
+
+    expected = [get_words(transcribe(*args)) for args in inputs]
+
+    # Consume two generators of the same pipeline in an interleaved way.
+    generator_a, generator_b = [transcribe(*args) for args in inputs]
+    segments_b = [next(generator_b)]
+    segments_a = [next(generator_a)]
+    segments_b.extend(generator_b)
+    segments_a.extend(generator_a)
+
+    assert get_words(segments_a) == expected[0]
+    assert get_words(segments_b) == expected[1]
