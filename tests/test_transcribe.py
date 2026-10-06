@@ -4,6 +4,7 @@ import os
 import numpy as np
 
 from faster_whisper import BatchedInferencePipeline, WhisperModel, decode_audio
+from faster_whisper.vad import collect_chunks
 
 
 def test_supported_languages():
@@ -391,3 +392,54 @@ def test_batched_vad_parameters_dict_not_mutated(jfk_path, monkeypatch):
     assert captured["vad_options"].max_speech_duration_s == 30
     assert captured["vad_options"].min_silence_duration_ms == 500
     assert vad_parameters == dict(max_speech_duration_s=10, min_silence_duration_ms=500)
+
+
+def test_collect_chunks_first_chunk_exceeds_max_duration():
+    audio = np.arange(40000, dtype=np.float32)
+    chunks = [{"start": 0, "end": 20000}, {"start": 25000, "end": 30000}]
+
+    audio_chunks, chunks_metadata = collect_chunks(
+        audio, chunks, sampling_rate=16000, max_duration=1
+    )
+
+    assert len(audio_chunks) == 2
+    np.testing.assert_array_equal(audio_chunks[0], audio[0:20000])
+    np.testing.assert_array_equal(audio_chunks[1], audio[25000:30000])
+    assert chunks_metadata == [
+        {"offset": 0.0, "duration": 1.25, "segments": [chunks[0]]},
+        {"offset": 1.25, "duration": 0.3125, "segments": [chunks[1]]},
+    ]
+
+
+def test_collect_chunks():
+    audio = np.arange(40000, dtype=np.float32)
+    chunks = [
+        {"start": 1000, "end": 7000},
+        {"start": 8000, "end": 14000},
+        {"start": 20000, "end": 26000},
+        {"start": 30000, "end": 32000},
+    ]
+
+    audio_chunks, chunks_metadata = collect_chunks(
+        audio, chunks, sampling_rate=16000, max_duration=1
+    )
+
+    assert len(audio_chunks) == 2
+    np.testing.assert_array_equal(
+        audio_chunks[0], np.concatenate([audio[1000:7000], audio[8000:14000]])
+    )
+    np.testing.assert_array_equal(
+        audio_chunks[1], np.concatenate([audio[20000:26000], audio[30000:32000]])
+    )
+    assert chunks_metadata == [
+        {"offset": 0.0, "duration": 0.75, "segments": chunks[0:2]},
+        {"offset": 0.75, "duration": 0.5, "segments": chunks[2:4]},
+    ]
+
+    audio_chunks, chunks_metadata = collect_chunks(audio, chunks)
+
+    assert len(audio_chunks) == 1
+    np.testing.assert_array_equal(
+        audio_chunks[0], np.concatenate([audio[c["start"] : c["end"]] for c in chunks])
+    )
+    assert chunks_metadata == [{"offset": 0.0, "duration": 1.25, "segments": chunks}]
