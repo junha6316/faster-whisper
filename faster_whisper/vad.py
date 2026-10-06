@@ -242,7 +242,8 @@ def collect_chunks(
 
     for chunk in chunks:
         if (
-            current_duration + chunk["end"] - chunk["start"]
+            current_duration > 0
+            and current_duration + chunk["end"] - chunk["start"]
             > max_duration * sampling_rate
         ):
             audio_chunks.append(current_audio)
@@ -254,7 +255,7 @@ def collect_chunks(
             total_duration += current_duration
             chunks_metadata.append(chunk_metadata)
 
-            current_segments = []
+            current_segments = [chunk]
 
             current_audio = audio[chunk["start"] : chunk["end"]]
             current_duration = chunk["end"] - chunk["start"]
