@@ -138,6 +138,7 @@ class BatchedInferencePipeline:
                 segment_size=segment_size,
                 segment_duration=duration,
                 seek=0,
+                keep_unfinished_segment=True,
             )
             segmented_outputs.append(
                 [
@@ -1044,6 +1045,7 @@ class WhisperModel:
         segment_size: int,
         segment_duration: float,
         seek: int,
+        keep_unfinished_segment: bool = False,
     ) -> List[List[int]]:
         current_segments = []
         single_timestamp_ending = (
@@ -1092,6 +1094,27 @@ class WhisperModel:
                     tokens[last_slice - 1] - tokenizer.timestamp_begin
                 )
                 seek += last_timestamp_position * self.input_stride
+
+                # the batched pipeline does not seek back, so the unfinished
+                # segment would be lost; keep it until the end of the chunk
+                unfinished_tokens = tokens[last_slice:]
+                if keep_unfinished_segment and any(
+                    token < tokenizer.timestamp_begin for token in unfinished_tokens
+                ):
+                    start_timestamp_position = (
+                        unfinished_tokens[0] - tokenizer.timestamp_begin
+                    )
+                    start_time = (
+                        time_offset + start_timestamp_position * self.time_precision
+                    )
+                    current_segments.append(
+                        dict(
+                            seek=seek,
+                            start=start_time,
+                            end=max(start_time, time_offset + segment_duration),
+                            tokens=unfinished_tokens,
+                        )
+                    )
 
         else:
             duration = segment_duration
