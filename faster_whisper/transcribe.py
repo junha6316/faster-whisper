@@ -4,7 +4,7 @@ import logging
 import os
 import zlib
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from inspect import signature
 from math import ceil
 from typing import BinaryIO, Iterable, List, Optional, Tuple, Union
@@ -403,11 +403,21 @@ class BatchedInferencePipeline:
                         min_silence_duration_ms=160,
                     )
                 elif isinstance(vad_parameters, dict):
+                    vad_parameters = dict(vad_parameters)
                     if "max_speech_duration_s" in vad_parameters.keys():
                         vad_parameters.pop("max_speech_duration_s")
 
                     vad_parameters = VadOptions(
                         **vad_parameters, max_speech_duration_s=chunk_length
+                    )
+                elif vad_parameters.max_speech_duration_s > chunk_length:
+                    self.model.logger.warning(
+                        "max_speech_duration_s is larger than chunk_length, "
+                        "setting it to %s",
+                        chunk_length,
+                    )
+                    vad_parameters = replace(
+                        vad_parameters, max_speech_duration_s=chunk_length
                     )
 
                 clip_timestamps = get_speech_timestamps(audio, vad_parameters)
